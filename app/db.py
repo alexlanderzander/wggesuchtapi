@@ -31,6 +31,14 @@ def decrypt_json(value: str) -> dict[str, Any]:
     return json.loads(_fernet().decrypt(value.encode('ascii')).decode('utf-8'))
 
 
+def encrypt_text(value: str) -> str:
+    return _fernet().encrypt(value.encode('utf-8')).decode('ascii')
+
+
+def decrypt_text(value: str) -> str:
+    return _fernet().decrypt(value.encode('ascii')).decode('utf-8')
+
+
 @contextmanager
 def db():
     path = get_settings().database_path
@@ -73,6 +81,20 @@ def init_db() -> None:
             );
             '''
         )
+
+        columns = {row['name'] for row in conn.execute('PRAGMA table_info(candidates)').fetchall()}
+        if 'application_text_enc' not in columns:
+            conn.execute('ALTER TABLE candidates ADD COLUMN application_text_enc TEXT')
+
+        # One-time migration of older plaintext rows into encrypted storage.
+        rows = conn.execute(
+            "SELECT id, latest_message FROM candidates WHERE application_text_enc IS NULL AND COALESCE(latest_message, '') != ''"
+        ).fetchall()
+        for row in rows:
+            conn.execute(
+                'UPDATE candidates SET application_text_enc = ?, latest_message = ? WHERE id = ?',
+                (encrypt_text(row['latest_message']), '', row['id']),
+            )
 
 
 def upsert_calendar_connection(member_id: str, provider: str, account_label: str | None, token_data: dict[str, Any]) -> str:
