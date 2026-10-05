@@ -59,7 +59,7 @@ class WgGesuchtClient:
 
             # Responded code 401 and first attempt
             # Try to refresh token
-            if self.refreshToken():
+            if self.refreshAccessToken():
 
                 # Success, retry request
                 return self.request(method, endpoint, params, payload, attempt + 1)
@@ -125,7 +125,7 @@ class WgGesuchtClient:
             return False
 
     # Refresh login token
-    def refreshToken(self):
+    def refreshAccessToken(self):
 
         # Build payload
         payload = {
