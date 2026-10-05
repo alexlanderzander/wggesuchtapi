@@ -1,2 +1,5 @@
 __pycache__
 account.json
+.env
+.data/
+*.sqlite3
