@@ -6,7 +6,7 @@ from typing import Any
 from core.wgGesuchtClient import WgGesuchtClient
 
 from .config import get_settings
-from .db import upsert_candidate
+from .candidates_store import upsert_candidate
 from .matching import score_application
 
 
