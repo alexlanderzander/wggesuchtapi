@@ -27,7 +27,7 @@ def _first_value(obj: Any, keys: set[str]) -> str | None:
     return None
 
 
-def _explicit_profile_facts(detail: Any) -> dict[str, str]:
+def _explicit_profile_facts(source: Any) -> dict[str, str]:
     """Return only explicit structured fields; never infer sensitive traits from text."""
     field_aliases = {
         'age': {'age', 'alter'},
@@ -37,7 +37,7 @@ def _explicit_profile_facts(detail: Any) -> dict[str, str]:
     }
     result: dict[str, str] = {}
     for label, aliases in field_aliases.items():
-        value = _first_value(detail, aliases)
+        value = _first_value(source, aliases)
         if value:
             result[label] = value[:160]
     return result
@@ -117,10 +117,10 @@ def sync_candidates(max_pages: int = 4) -> dict[str, Any]:
                 continue
 
             display_name = _first_value(
-                detail,
+                {'summary': summary, 'detail': detail},
                 {'display_name', 'displayname', 'name', 'firstname', 'first_name'},
             )
-            profile = _explicit_profile_facts(detail)
+            profile = _explicit_profile_facts({'summary': summary, 'detail': detail})
             signals = extract_application_signals(application_text, profile=profile)
             upsert_candidate(
                 external_id=conversation_id,
