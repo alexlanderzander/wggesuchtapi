@@ -7,15 +7,17 @@ Small self-hosted application built on top of the unofficial `WgGesuchtAPI` clie
 ## What the MVP currently does
 
 - Reads WG-Gesucht conversation threads into a local review inbox.
-- Shows explicit WG-relevant statements from the application text (shared WG life, cleaning routines, privacy/personal space, viewing/move-in logistics).
+- Shows explicit WG-relevant statements from the application text (shared WG life, cleaning routines, privacy/personal space, reliability/communication, social life, viewing/move-in logistics).
 - Shows application completeness such as word count, detail level, topics covered, and whether a message is essentially only an availability question.
+- Shows explicit structured profile facts (for example age/gender if WG-Gesucht actually supplies them) as display-only context; the app does not infer them from names, photos, pronouns, or message text.
 - Keeps the actual shortlist/interview/pass choice manual.
+- Generates signed calendar-connect links for roommates, applicants, or guests.
 - Connects multiple Google Calendar and Microsoft/Outlook Calendar accounts independently with OAuth.
 - Reads availability, finds common free slots, and creates in-person or online viewing appointments.
 - Creates Google Meet links for Google events and requests Teams online meetings for Microsoft events.
 - Encrypts calendar OAuth token data and applicant message text at rest using `APP_SECRET_KEY`.
 
-The automated review layer does **not** score or rank housing applicants using sensitive traits such as age, gender, nationality, religion, disability, sexual orientation, or similar personal attributes. If an applicant voluntarily includes such information, it can remain visible in their original application text for human review, but it is not an automated matching input.
+The automated review layer does **not** score or rank housing applicants using sensitive traits such as age, gender, nationality, religion, disability, sexual orientation, or similar personal attributes. If an applicant voluntarily includes such information, it may be displayed for human context, but it is not an automated matching input.
 
 ## Run locally
 
@@ -53,6 +55,8 @@ MICROSOFT_REDIRECT_URI=http://127.0.0.1:8000/api/calendar/microsoft/callback
 
 `.env`, `.data/`, session files, SQLite databases, and OAuth tokens must never be committed.
 
+`APP_BASE_URL` must be the externally reachable URL when you deploy the MVP, because the app uses it when generating roommate/applicant calendar-connect links.
+
 ## Google Calendar setup
 
 1. Create a Google Cloud project and enable the Google Calendar API.
@@ -80,6 +84,20 @@ Official references:
 - https://learn.microsoft.com/graph/permissions-reference
 - https://learn.microsoft.com/graph/api/resources/calendar
 
+## Calendar invite flow
+
+From the home page, enter a roommate/applicant/guest name and create a connect link. The server creates a random participant id and a signed link that expires after 30 days.
+
+The participant opens that link themselves and chooses Google Calendar or Outlook/Microsoft. Their OAuth authorization happens on the provider's own site; the WG Review app receives provider tokens, not their calendar password.
+
+This means the MVP supports mixed calendars such as:
+
+- roommate A: Google Calendar
+- roommate B: Outlook
+- applicant: Google Calendar
+
+All resulting calendar connections can participate in common-free-slot calculations.
+
 ## Calendar model
 
 Every roommate or applicant connects their own calendar account. Connections are stored separately per participant/provider. The scheduler combines only busy intervals to find common slots; event titles/content are not needed for the common-slot calculation.
@@ -89,13 +107,13 @@ For a viewing:
 - `mode=in_person`: create a normal event with a physical location.
 - `mode=online`: Google requests a Google Meet conference; Microsoft requests a Teams meeting.
 
-The default scheduling timezone is `Europe/Berlin`, while OAuth calendars can of course belong to users in other time zones.
+The default scheduling timezone is `Europe/Berlin`, while OAuth calendars can belong to users in other time zones.
 
 ## WG-Gesucht adapter
 
 The original client lives in `core/wgGesuchtClient.py`. The MVP uses it server-side only. Credentials, access tokens, refresh tokens, PHP sessions, and device references must never be exposed to browser JavaScript.
 
-The fork had a refresh-token naming collision in the original implementation. The branch uses a separate refresh method (`refreshAccessToken`) so the stored refresh-token string no longer shadows a callable method.
+The fork had a refresh-token naming collision in the original implementation. The branch uses a separate refresh method (`refreshAccessToken`) so the stored refresh-token string no longer shadows a callable method. The refresh request is also guarded so a rejected refresh token does not recurse indefinitely.
 
 Current conversation support:
 
@@ -110,13 +128,15 @@ A reliable **reply-to-existing-conversation** method is not yet included because
 - `POST /api/wg/sync` — sync WG-Gesucht conversations.
 - `GET /api/candidates` — list applicants with evidence/completeness signals.
 - `PATCH /api/candidates/{id}/status` — manual `new`, `shortlist`, `interview`, or `pass` state.
-- `GET /api/calendar/{provider}/connect?member_id=...` — start Google/Microsoft OAuth.
+- `POST /api/calendar/invites` — create a signed roommate/applicant/guest calendar-connect link.
+- `GET /calendar/invite/{token}` — participant-facing provider selection page.
+- `GET /api/calendar/{provider}/connect?invite_token=...` — start Google/Microsoft OAuth for a signed invite.
 - `GET /api/calendar/connections` — list connected calendars without exposing tokens.
 - `POST /api/schedule/slots` — find common free slots.
 - `POST /api/calendar/{connection_id}/appointments` — create an in-person or online event.
 
 ## Next MVP hardening
 
-Before exposing this beyond a trusted local/dev environment, add application authentication and invite-scoped participant links. The current `member_id` query parameter is convenient for local development but is not sufficient authorization for an internet-facing deployment.
+Before exposing this beyond a trusted WG deployment, add application authentication/authorization around the admin UI and invite creation endpoint. Calendar invite links are signed and time-limited, but the admin dashboard itself is not yet protected by login.
 
 Apple Calendar should be added separately (likely via a carefully designed CalDAV/ICS flow rather than pretending Apple has the same OAuth model as Google/Microsoft).
