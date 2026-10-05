@@ -5,9 +5,9 @@ from typing import Any
 
 from core.wgGesuchtClient import WgGesuchtClient
 
-from .config import get_settings
 from .candidates_store import upsert_candidate
-from .matching import score_application
+from .config import get_settings
+from .matching import extract_application_signals
 
 
 def _first_value(obj: Any, keys: set[str]) -> str | None:
@@ -42,23 +42,34 @@ def _collect_message_text(obj: Any) -> list[str]:
     return texts
 
 
-def _client() -> WgGesuchtClient:
-    settings = get_settings()
-    client = WgGesuchtClient()
-    session_path = Path(settings.wg_session_file)
-    if session_path.exists():
-        client.importAccount(json.loads(session_path.read_text(encoding='utf-8')))
-        return client
-    if not settings.wg_gesucht_email or not settings.wg_gesucht_password:
-        raise RuntimeError('WG-Gesucht credentials are not configured in environment variables')
-    if not client.login(settings.wg_gesucht_email, settings.wg_gesucht_password):
-        raise RuntimeError('WG-Gesucht login failed')
+def _save_session(client: WgGesuchtClient, session_path: Path) -> None:
     session_path.parent.mkdir(parents=True, exist_ok=True)
     session_path.write_text(json.dumps(client.exportAccount()), encoding='utf-8')
     try:
         os.chmod(session_path, 0o600)
     except OSError:
         pass
+
+
+def _client() -> WgGesuchtClient:
+    settings = get_settings()
+    client = WgGesuchtClient()
+    session_path = Path(settings.wg_session_file)
+
+    if session_path.exists():
+        try:
+            client.importAccount(json.loads(session_path.read_text(encoding='utf-8')))
+            if client.myProfile():
+                _save_session(client, session_path)
+                return client
+        except (OSError, ValueError, KeyError, json.JSONDecodeError):
+            pass
+
+    if not settings.wg_gesucht_email or not settings.wg_gesucht_password:
+        raise RuntimeError('WG-Gesucht credentials are not configured in environment variables')
+    if not client.login(settings.wg_gesucht_email, settings.wg_gesucht_password):
+        raise RuntimeError('WG-Gesucht login failed')
+    _save_session(client, session_path)
     return client
 
 
@@ -66,6 +77,7 @@ def sync_candidates(max_pages: int = 4) -> dict[str, Any]:
     client = _client()
     synced = 0
     errors: list[str] = []
+
     for page in range(1, max_pages + 1):
         conversations = client.conversations(str(page))
         if conversations is False:
@@ -73,6 +85,7 @@ def sync_candidates(max_pages: int = 4) -> dict[str, Any]:
             break
         if not conversations:
             break
+
         for summary in conversations:
             conversation_id = _first_value(summary, {'id', 'conversation_id', 'conversationid'})
             if not conversation_id:
@@ -81,20 +94,28 @@ def sync_candidates(max_pages: int = 4) -> dict[str, Any]:
             if detail is False:
                 errors.append(f'Could not load conversation {conversation_id}')
                 continue
+
             messages = _collect_message_text(detail)
             application_text = '\n\n'.join(dict.fromkeys(messages))
             if not application_text:
                 continue
-            display_name = _first_value(detail, {'display_name', 'displayname', 'name', 'firstname', 'first_name'})
-            fit = score_application(application_text)
+
+            display_name = _first_value(
+                detail,
+                {'display_name', 'displayname', 'name', 'firstname', 'first_name'},
+            )
+            signals = extract_application_signals(application_text)
             upsert_candidate(
                 external_id=conversation_id,
                 display_name=display_name or 'Applicant',
                 conversation_id=conversation_id,
                 application_text=application_text,
-                fit=fit,
+                signals=signals,
             )
             synced += 1
+
         if len(conversations) < 25:
             break
+
+    _save_session(client, Path(get_settings().wg_session_file))
     return {'synced': synced, 'errors': errors}
