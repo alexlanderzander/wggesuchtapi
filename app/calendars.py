@@ -41,6 +41,7 @@ class CalendarProvider(ABC):
         description: str,
         attendee_email: str | None,
         location: str | None,
+        online: bool = False,
     ) -> dict[str, Any]: ...
 
     def ensure_token(self, token_data: dict[str, Any]) -> dict[str, Any]:
@@ -137,7 +138,7 @@ class GoogleCalendarProvider(CalendarProvider):
         response.raise_for_status()
         return response.json().get('calendars', {}).get('primary', {}).get('busy', [])
 
-    def create_event(self, token_data: dict[str, Any], *, start: datetime, end: datetime, title: str, description: str, attendee_email: str | None, location: str | None) -> dict[str, Any]:
+    def create_event(self, token_data: dict[str, Any], *, start: datetime, end: datetime, title: str, description: str, attendee_email: str | None, location: str | None, online: bool = False) -> dict[str, Any]:
         token_data = self.ensure_token(token_data)
         payload: dict[str, Any] = {
             'summary': title,
@@ -149,9 +150,19 @@ class GoogleCalendarProvider(CalendarProvider):
             payload['attendees'] = [{'email': attendee_email}]
         if location:
             payload['location'] = location
+        params = {'sendUpdates': 'all'}
+        if online:
+            import uuid
+            payload['conferenceData'] = {
+                'createRequest': {
+                    'requestId': str(uuid.uuid4()),
+                    'conferenceSolutionKey': {'type': 'hangoutsMeet'},
+                }
+            }
+            params['conferenceDataVersion'] = '1'
         response = requests.post(
             self.EVENTS_URL,
-            params={'sendUpdates': 'all'},
+            params=params,
             headers={'Authorization': f"Bearer {token_data['access_token']}"},
             json=payload,
             timeout=20,
@@ -247,7 +258,7 @@ class MicrosoftCalendarProvider(CalendarProvider):
             result.append({'start': event['start']['dateTime'] + 'Z', 'end': event['end']['dateTime'] + 'Z'})
         return result
 
-    def create_event(self, token_data: dict[str, Any], *, start: datetime, end: datetime, title: str, description: str, attendee_email: str | None, location: str | None) -> dict[str, Any]:
+    def create_event(self, token_data: dict[str, Any], *, start: datetime, end: datetime, title: str, description: str, attendee_email: str | None, location: str | None, online: bool = False) -> dict[str, Any]:
         token_data = self.ensure_token(token_data)
         payload: dict[str, Any] = {
             'subject': title,
@@ -259,6 +270,9 @@ class MicrosoftCalendarProvider(CalendarProvider):
             payload['attendees'] = [{'emailAddress': {'address': attendee_email}, 'type': 'required'}]
         if location:
             payload['location'] = {'displayName': location}
+        if online:
+            payload['isOnlineMeeting'] = True
+            payload['onlineMeetingProvider'] = 'teamsForBusiness'
         response = requests.post(
             f'{self.GRAPH_URL}/me/events',
             headers={'Authorization': f"Bearer {token_data['access_token']}"},
