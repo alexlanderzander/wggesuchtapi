@@ -23,7 +23,7 @@ from .db import (
 from .scheduler import find_common_slots
 from .wg_service import sync_candidates
 
-app = FastAPI(title='WG Review MVP', version='0.2.0')
+app = FastAPI(title='WG Review MVP', version='0.2.1')
 
 
 @app.on_event('startup')
@@ -68,10 +68,10 @@ def home() -> str:
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>WG Review MVP</title><style>
 body{font-family:system-ui,sans-serif;max-width:1100px;margin:32px auto;padding:0 20px;color:#171717;background:#f7f7f7}
-.card{background:#fff;border:1px solid #ddd;border-radius:16px;padding:20px;margin:16px 0}.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.candidate{border-top:1px solid #eee;padding:18px 0}.badge{display:inline-block;background:#eee;border-radius:999px;padding:4px 9px;margin:3px 5px 3px 0;font-size:13px}.badge.warn{background:#fff1d6}.badge.ok{background:#e8f5e9}button,a.btn{padding:10px 14px;border-radius:10px;border:0;background:#111;color:#fff;text-decoration:none;cursor:pointer}.secondary{background:#eee;color:#111}.muted{color:#666}.small{font-size:13px}input{padding:9px;border:1px solid #ccc;border-radius:8px}pre{white-space:pre-wrap}details{margin-top:10px}.message{background:#fafafa;border-radius:10px;padding:12px;white-space:pre-wrap;max-height:320px;overflow:auto}
+.card{background:#fff;border:1px solid #ddd;border-radius:16px;padding:20px;margin:16px 0}.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.candidate{border-top:1px solid #eee;padding:18px 0}.badge{display:inline-block;background:#eee;border-radius:999px;padding:4px 9px;margin:3px 5px 3px 0;font-size:13px}.badge.warn{background:#fff1d6}.badge.ok{background:#e8f5e9}.profile{display:flex;gap:12px;flex-wrap:wrap;margin:9px 0}.profile span{font-size:13px}.profile b{font-weight:600}button,a.btn{padding:10px 14px;border-radius:10px;border:0;background:#111;color:#fff;text-decoration:none;cursor:pointer}.secondary{background:#eee;color:#111}.muted{color:#666}.small{font-size:13px}input{padding:9px;border:1px solid #ccc;border-radius:8px}pre{white-space:pre-wrap}details{margin-top:10px}.message{background:#fafafa;border-radius:10px;padding:12px;white-space:pre-wrap;max-height:320px;overflow:auto}
 </style></head><body>
 <h1>WG Review MVP</h1><p class="muted">Human review of WG-Gesucht applications + shared viewing scheduling.</p>
-<div class="card"><h2>Applicants</h2><p class="small muted">The app surfaces explicit WG-relevant statements and application completeness. It does not use sensitive traits such as age or gender to rank or recommend applicants.</p><div class="row"><button onclick="syncCandidates()">Sync WG-Gesucht</button><button class="secondary" onclick="loadCandidates()">Refresh</button></div><div id="candidates">Loading…</div></div>
+<div class="card"><h2>Applicants</h2><p class="small muted">The app surfaces explicit WG-relevant statements and application completeness. Structured profile facts can be displayed, but sensitive traits such as age or gender are not used to rank or recommend applicants.</p><div class="row"><button onclick="syncCandidates()">Sync WG-Gesucht</button><button class="secondary" onclick="loadCandidates()">Refresh</button></div><div id="candidates">Loading…</div></div>
 <div class="card"><h2>Connect calendars</h2><p>Each roommate or guest authorizes their own Google or Microsoft account inside this app.</p><input id="member" value="roommate-1"><p><a class="btn" id="g">Google Calendar</a> <a class="btn" id="m">Outlook / Microsoft</a></p><pre id="connections"></pre></div>
 <script>
 const member=document.getElementById('member'); const g=document.getElementById('g'); const m=document.getElementById('m');
@@ -81,18 +81,23 @@ function refreshLinks(){g.href=link('google');m.href=link('microsoft')} member.o
 async function loadConnections(){connections.textContent=JSON.stringify(await (await fetch('/api/calendar/connections')).json(),null,2)}
 async function syncCandidates(){const r=await fetch('/api/wg/sync',{method:'POST'}); const body=await r.json(); if(!r.ok){alert(body.detail||'Sync failed')} else {alert('Synced '+body.synced+' conversations');} loadCandidates()}
 async function setStatus(id,status){await fetch('/api/candidates/'+id+'/status',{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({status})});loadCandidates()}
-function detailLabel(v){return ({very_short:'Very short',basic:'Basic',detailed:'Detailed',very_detailed:'Very detailed'})[v]||v}
+function detailLabel(v){return ({sparse:'Sparse',medium:'Medium detail',detailed:'Detailed',very_short:'Very short',basic:'Basic',very_detailed:'Very detailed'})[v]||v}
+function profileHtml(profile){
+  const labels={age:'Age',gender:'Gender',occupation:'Occupation',study:'Study'};
+  return Object.entries(profile||{}).map(([k,v])=>'<span><b>'+esc(labels[k]||k)+':</b> '+esc(v)+'</span>').join('');
+}
 async function loadCandidates(){
   const data=await (await fetch('/api/candidates')).json();
   candidates.innerHTML=data.length?'':'<p class="muted">No applicants synced yet.</p>';
   for(const c of data){
-    const s=c.signals||{}; const detail=s.application_detail||{}; const criteria=s.criteria||[];
+    const s=c.signals||{}; const detail=s.application_detail||{}; const criteria=s.criteria||[]; const profile=s.profile||{};
     const badges=[];
-    badges.push('<span class="badge '+(detail.availability_only?'warn':'')+'">'+esc(detailLabel(detail.detail_level||'unknown'))+' · '+esc(detail.word_count||0)+' words</span>');
+    badges.push('<span class="badge '+(detail.availability_only?'warn':'')+'">'+esc(detailLabel(detail.detail_level||detail.level||'unknown'))+' · '+esc(detail.word_count||0)+' words</span>');
     if(detail.availability_only) badges.push('<span class="badge warn">Mostly availability question</span>');
     for(const item of criteria){if(item.mentioned) badges.push('<span class="badge ok">'+esc(item.label)+'</span>')}
     const evidence=criteria.filter(x=>x.evidence&&x.evidence.length).map(x=>'<li><b>'+esc(x.label)+':</b> '+esc(x.evidence[0])+'</li>').join('');
-    candidates.innerHTML += '<div class="candidate"><div class="row"><b>'+esc(c.display_name)+'</b><span class="muted">'+esc(c.status)+'</span></div><div>'+badges.join('')+'</div>'+(evidence?'<ul>'+evidence+'</ul>':'<p class="muted small">No WG-specific topics detected yet.</p>')+'<details><summary>Application text</summary><div class="message">'+esc(c.latest_message||'')+'</div></details><div class="row" style="margin-top:12px"><button onclick="setStatus(\''+esc(c.id)+'\',\'shortlist\')">Shortlist</button><button class="secondary" onclick="setStatus(\''+esc(c.id)+'\',\'interview\')">Interview</button><button class="secondary" onclick="setStatus(\''+esc(c.id)+'\',\'pass\')">Pass</button></div></div>';
+    const profileBlock=Object.keys(profile).length?'<div class="profile">'+profileHtml(profile)+'</div><div class="small muted">Profile facts shown for context only; not used by automated matching.</div>':'';
+    candidates.innerHTML += '<div class="candidate"><div class="row"><b>'+esc(c.display_name)+'</b><span class="muted">'+esc(c.status)+'</span></div>'+profileBlock+'<div>'+badges.join('')+'</div>'+(evidence?'<ul>'+evidence+'</ul>':'<p class="muted small">No WG-specific topics detected yet.</p>')+'<details><summary>Application text</summary><div class="message">'+esc(c.latest_message||'')+'</div></details><div class="row" style="margin-top:12px"><button onclick="setStatus(\''+esc(c.id)+'\',\'shortlist\')">Shortlist</button><button class="secondary" onclick="setStatus(\''+esc(c.id)+'\',\'interview\')">Interview</button><button class="secondary" onclick="setStatus(\''+esc(c.id)+'\',\'pass\')">Pass</button></div></div>';
   }
 }
 loadCandidates();loadConnections();
