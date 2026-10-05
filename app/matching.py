@@ -90,8 +90,10 @@ def _detail_summary(text: str) -> dict[str, Any]:
         level = 'medium'
     return {
         'level': level,
+        'detail_level': level,
         'word_count': len(words),
         'covered_topics': covered,
+        'wg_topics_mentioned': covered,
         'topics': topics,
         'availability_only': availability_only,
         'note': 'Measures how much relevant information was provided, not applicant suitability.',
