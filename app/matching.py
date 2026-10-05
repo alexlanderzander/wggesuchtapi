@@ -2,36 +2,53 @@ import re
 from typing import Any
 
 
-# Explicit-text signals only. These are displayed as evidence for human review;
-# they are not weighted, scored, or used to rank housing applicants.
+# Explicit-text signals for human review only. They are not weighted, scored,
+# or used to rank housing applicants.
 SIGNALS: dict[str, dict[str, Any]] = {
     'shared_wg_life': {
-        'label': 'Shared WG life mentioned',
+        'label': 'Shared WG life',
         'keywords': [
             'zusammen kochen', 'gemeinsam kochen', 'wg-abend', 'wg abend', 'spieleabend',
-            'gemeinsam zeit', 'zusammen zeit', 'wg leben', 'wg-leben',
-            'shared dinner', 'cook together', 'spend time together',
+            'gemeinsam zeit', 'zusammen zeit', 'wg leben', 'wg-leben', 'freundschaftlich',
+            'gesellig', 'quatschen', 'zusammen raus', 'shared dinner', 'cook together',
+            'spend time together', 'social flatshare',
         ],
     },
-    'cleaning_routines': {
-        'label': 'Cleaning / shared chores mentioned',
+    'cleanliness': {
+        'label': 'Cleanliness & shared chores',
         'keywords': [
             'ordentlich', 'sauberkeit', 'sauber', 'putzplan', 'putzen', 'aufräumen',
             'clean', 'cleanliness', 'tidy', 'chores',
         ],
     },
-    'privacy_boundaries': {
-        'label': 'Privacy / personal space mentioned',
+    'privacy_and_boundaries': {
+        'label': 'Privacy & respectful boundaries',
         'keywords': [
             'privatsphäre', 'privatsphaere', 'rückzug', 'rueckzug', 'ruhe', 'respekt',
-            'privacy', 'quiet time', 'own space',
+            'respektvoll', 'privacy', 'quiet time', 'own space', 'boundaries',
         ],
     },
-    'viewing_logistics': {
-        'label': 'Viewing / move-in logistics mentioned',
+    'reliability_and_communication': {
+        'label': 'Reliability & communication',
+        'keywords': [
+            'zuverlässig', 'zuverlaessig', 'verlässlich', 'verlaesslich', 'kommunikation',
+            'absprechen', 'bescheid sagen', 'unkompliziert', 'responsible', 'reliable',
+            'dependable', 'communicat',
+        ],
+    },
+    'friends_and_social_life': {
+        'label': 'Friends / social life',
+        'keywords': [
+            'freunde', 'freundinnen', 'gäste', 'gaeste', 'besuch', 'party', 'feiern',
+            'konzert', 'theater', 'sport', 'hobby', 'friends', 'guests', 'social life',
+        ],
+    },
+    'viewing_and_move_in': {
+        'label': 'Viewing / move-in logistics',
         'keywords': [
             'besichtigung', 'online', 'video call', 'videocall', 'vor ort', 'einzug',
             'zwischenmiete', 'untermiete', 'sublet', 'viewing', 'move in', 'available',
+            'flexibel',
         ],
     },
 }
@@ -41,21 +58,50 @@ def _sentences(text: str) -> list[str]:
     return [s.strip() for s in re.split(r'(?<=[.!?])\s+|\n+', text) if s.strip()]
 
 
-def _detail_level(word_count: int) -> str:
-    if word_count < 20:
-        return 'very_short'
-    if word_count < 70:
-        return 'basic'
-    if word_count < 160:
-        return 'detailed'
-    return 'very_detailed'
+def _contains_any(text: str, values: list[str]) -> bool:
+    low = text.casefold()
+    return any(value in low for value in values)
 
 
-def extract_application_signals(text: str) -> dict[str, Any]:
-    """Surface explicit statements without making a housing recommendation."""
+def _detail_summary(text: str) -> dict[str, Any]:
+    words = re.findall(r"\b[\w'’-]+\b", text, flags=re.UNICODE)
+    topics = {
+        'personal_intro': _contains_any(text, ['ich bin', 'mein name', 'über mich', 'about me']),
+        'work_or_study': _contains_any(text, ['studiere', 'studium', 'student', 'studentin', 'arbeite', 'job', 'beruf', 'ausbildung', 'work']),
+        'hobbies_or_social_life': _contains_any(text, ['freizeit', 'hobby', 'sport', 'freunde', 'freundinnen', 'theater', 'konzert', 'wandern', 'tanze', 'volleyball']),
+        'wg_expectations': _contains_any(text, ['wg leben', 'wg-leben', 'mir wäre eine wg', 'mir waere eine wg', 'gemeinsam', 'zusammen kochen', 'privatsphäre', 'privatsphaere']),
+        'move_in_or_duration': _contains_any(text, ['einzug', 'ab sofort', 'ab dem', 'zwischenmiete', 'untermiete', 'monate', 'move in', 'sublet']),
+        'viewing_availability': _contains_any(text, ['besichtigung', 'flexibel', 'vorbeikommen', 'online', 'video call', 'videocall', 'viewing']),
+    }
+    covered = sum(topics.values())
+    normalized = text.casefold()
+    availability_only = (
+        len(words) <= 20
+        and any(phrase in normalized for phrase in [
+            'noch frei', 'noch verfügbar', 'noch verfuegbar', 'noch da',
+            'is it available', 'still available', 'zimmer noch frei',
+        ])
+    )
+    if availability_only or (len(words) < 25 and covered <= 1):
+        level = 'sparse'
+    elif len(words) >= 90 or covered >= 5:
+        level = 'detailed'
+    else:
+        level = 'medium'
+    return {
+        'level': level,
+        'word_count': len(words),
+        'covered_topics': covered,
+        'topics': topics,
+        'availability_only': availability_only,
+        'note': 'Measures how much relevant information was provided, not applicant suitability.',
+    }
+
+
+def extract_application_signals(text: str, profile: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Surface explicit application facts and WG-value evidence for human review."""
     normalized = text.casefold()
     sentences = _sentences(text)
-    words = re.findall(r"\b[\w'’-]+\b", text, flags=re.UNICODE)
     criteria = []
 
     for key, config in SIGNALS.items():
@@ -75,27 +121,13 @@ def extract_application_signals(text: str) -> dict[str, Any]:
             'evidence': evidence,
         })
 
-    availability_only = (
-        len(words) <= 20
-        and any(phrase in normalized for phrase in [
-            'noch frei', 'noch verfügbar', 'noch verfuegbar', 'noch da',
-            'is it available', 'still available', 'zimmer noch frei',
-        ])
-    )
-    mentioned_topics = sum(1 for item in criteria if item['mentioned'])
-
     return {
+        'profile': profile or {},
+        'application_detail': _detail_summary(text),
         'criteria': criteria,
-        'application_detail': {
-            'word_count': len(words),
-            'sentence_count': len(sentences),
-            'detail_level': _detail_level(len(words)),
-            'wg_topics_mentioned': mentioned_topics,
-            'availability_only': availability_only,
-        },
         'note': (
-            'Evidence summary from explicit application text only. '
-            'No score or recommendation is produced; roommates make the housing decision. '
-            'Sensitive traits such as age or gender are not used by the automated review layer.'
+            'Structured summary from explicit application/profile information only. '
+            'Volunteered age, gender and other profile facts can be displayed for roommates, '
+            'but sensitive traits are not used to score, rank, or recommend housing applicants.'
         ),
     }
