@@ -52,7 +52,21 @@ def _row_to_candidate(row) -> dict[str, Any]:
     return item
 
 
-def list_candidates() -> list[dict[str, Any]]:
+def _detail_values(candidate: dict[str, Any]) -> tuple[int, int, int]:
+    detail = candidate.get('signals', {}).get('application_detail', {})
+    level_rank = {'sparse': 0, 'medium': 1, 'detailed': 2}.get(detail.get('level'), -1)
+    covered_topics = int(detail.get('covered_topics') or 0)
+    word_count = int(detail.get('word_count') or 0)
+    return level_rank, covered_topics, word_count
+
+
+def list_candidates(*, sort: str = 'completeness', detail_filter: str | None = None) -> list[dict[str, Any]]:
+    """List candidates without using sensitive profile traits for ordering.
+
+    `completeness` sorts only by application-detail signals: detail level,
+    number of neutral topics covered, and word count. Age, gender and other
+    displayed profile facts are deliberately excluded from the sort key.
+    """
     with db() as conn:
         rows = conn.execute(
             '''
@@ -62,7 +76,20 @@ def list_candidates() -> list[dict[str, Any]]:
             ORDER BY updated_at DESC
             '''
         ).fetchall()
-    return [_row_to_candidate(row) for row in rows]
+
+    result = [_row_to_candidate(row) for row in rows]
+    if detail_filter:
+        result = [
+            candidate for candidate in result
+            if candidate.get('signals', {}).get('application_detail', {}).get('level') == detail_filter
+        ]
+
+    if sort == 'completeness':
+        result.sort(
+            key=lambda candidate: (*_detail_values(candidate), candidate.get('updated_at', '')),
+            reverse=True,
+        )
+    return result
 
 
 def get_candidate(candidate_id: str) -> dict[str, Any] | None:
