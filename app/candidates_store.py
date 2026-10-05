@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from .db import db
+from .db import db, decrypt_text, encrypt_text
 
 
 def _now() -> str:
@@ -15,19 +15,30 @@ def upsert_candidate(*, external_id: str, display_name: str, conversation_id: st
         row = conn.execute('SELECT id, status FROM candidates WHERE external_id = ?', (external_id,)).fetchone()
         candidate_id = row['id'] if row else str(uuid.uuid4())
         status = row['status'] if row else 'new'
-        preview = application_text[-2000:]
         conn.execute(
             '''
-            INSERT INTO candidates (id, external_id, display_name, conversation_id, latest_message, fit_json, status, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO candidates
+                (id, external_id, display_name, conversation_id, latest_message, application_text_enc, fit_json, status, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(external_id) DO UPDATE SET
                 display_name = excluded.display_name,
                 conversation_id = excluded.conversation_id,
                 latest_message = excluded.latest_message,
+                application_text_enc = excluded.application_text_enc,
                 fit_json = excluded.fit_json,
                 updated_at = excluded.updated_at
             ''',
-            (candidate_id, external_id, display_name, conversation_id, preview, json.dumps(signals), status, _now()),
+            (
+                candidate_id,
+                external_id,
+                display_name,
+                conversation_id,
+                '',
+                encrypt_text(application_text),
+                json.dumps(signals),
+                status,
+                _now(),
+            ),
         )
         return candidate_id
 
@@ -35,13 +46,21 @@ def upsert_candidate(*, external_id: str, display_name: str, conversation_id: st
 def _row_to_candidate(row) -> dict[str, Any]:
     item = dict(row)
     item['signals'] = json.loads(item.pop('fit_json') or '{}')
+    encrypted = item.pop('application_text_enc', None)
+    legacy = item.pop('latest_message', '') or ''
+    item['latest_message'] = decrypt_text(encrypted) if encrypted else legacy
     return item
 
 
 def list_candidates() -> list[dict[str, Any]]:
     with db() as conn:
         rows = conn.execute(
-            'SELECT id, external_id, display_name, conversation_id, latest_message, fit_json, status, updated_at FROM candidates ORDER BY updated_at DESC'
+            '''
+            SELECT id, external_id, display_name, conversation_id, latest_message,
+                   application_text_enc, fit_json, status, updated_at
+            FROM candidates
+            ORDER BY updated_at DESC
+            '''
         ).fetchall()
     return [_row_to_candidate(row) for row in rows]
 
@@ -49,7 +68,11 @@ def list_candidates() -> list[dict[str, Any]]:
 def get_candidate(candidate_id: str) -> dict[str, Any] | None:
     with db() as conn:
         row = conn.execute(
-            'SELECT id, external_id, display_name, conversation_id, latest_message, fit_json, status, updated_at FROM candidates WHERE id = ?',
+            '''
+            SELECT id, external_id, display_name, conversation_id, latest_message,
+                   application_text_enc, fit_json, status, updated_at
+            FROM candidates WHERE id = ?
+            ''',
             (candidate_id,),
         ).fetchone()
     return _row_to_candidate(row) if row else None
