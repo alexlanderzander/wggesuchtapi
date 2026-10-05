@@ -4,13 +4,15 @@ import hmac
 import json
 import time
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 
 from .calendars import provider_for
+from .scheduler import find_common_slots
+from .wg_service import sync_candidates
 from .config import get_settings
 from .db import (
     get_calendar_connection,
@@ -19,6 +21,7 @@ from .db import (
     update_calendar_tokens,
     upsert_calendar_connection,
 )
+from .candidates_store import list_candidates, set_candidate_status
 
 app = FastAPI(title='WG Review MVP', version='0.1.0')
 
@@ -64,18 +67,20 @@ def home() -> str:
     return '''<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>WG Review MVP</title><style>
-body{font-family:system-ui,sans-serif;max-width:900px;margin:40px auto;padding:0 20px;color:#171717}
-.card{border:1px solid #ddd;border-radius:16px;padding:20px;margin:16px 0}button,a.btn{padding:10px 14px;border-radius:10px;border:0;background:#111;color:#fff;text-decoration:none;margin-right:8px}.muted{color:#666}input{padding:9px;border:1px solid #ccc;border-radius:8px}
+body{font-family:system-ui,sans-serif;max-width:1050px;margin:32px auto;padding:0 20px;color:#171717;background:#fafafa}
+.card{background:#fff;border:1px solid #ddd;border-radius:16px;padding:20px;margin:16px 0}.row{display:flex;gap:10px;flex-wrap:wrap}.candidate{border-top:1px solid #eee;padding:14px 0}.score{font-size:28px;font-weight:700}button,a.btn{padding:10px 14px;border-radius:10px;border:0;background:#111;color:#fff;text-decoration:none;cursor:pointer}.secondary{background:#eee;color:#111}.muted{color:#666}input{padding:9px;border:1px solid #ccc;border-radius:8px}pre{white-space:pre-wrap}
 </style></head><body>
-<h1>WG Review MVP</h1><p class="muted">Candidate review + shared interview scheduling.</p>
-<div class="card"><h2>Connect a roommate calendar</h2><p>Enter a local member id/name, then connect the provider. Each person authorizes their own account.</p>
-<input id="member" value="roommate-1"><p><a class="btn" id="g">Google Calendar</a><a class="btn" id="m">Outlook / Microsoft</a></p></div>
-<div class="card"><h2>Connections</h2><pre id="connections">Loading…</pre></div>
+<h1>WG Review MVP</h1><p class="muted">Explainable applicant pre-screening + shared interview scheduling.</p>
+<div class="card"><h2>Applicants</h2><div class="row"><button onclick="syncCandidates()">Sync WG-Gesucht</button><button class="secondary" onclick="loadCandidates()">Refresh</button></div><div id="candidates">Loading…</div></div>
+<div class="card"><h2>Connect calendars</h2><p>Each roommate/applicant authorizes their own account. Use a stable local member id.</p><input id="member" value="roommate-1"><p><a class="btn" id="g">Google Calendar</a> <a class="btn" id="m">Outlook / Microsoft</a></p><pre id="connections"></pre></div>
 <script>
-const member=document.getElementById('member');
-function link(provider){return '/api/calendar/'+provider+'/connect?member_id='+encodeURIComponent(member.value)}
-function refreshLinks(){g.href=link('google');m.href=link('microsoft')} member.oninput=refreshLinks;refreshLinks();
-fetch('/api/calendar/connections').then(r=>r.json()).then(x=>connections.textContent=JSON.stringify(x,null,2));
+const member=document.getElementById('member'); const g=document.getElementById('g'); const m=document.getElementById('m');
+function link(provider){return '/api/calendar/'+provider+'/connect?member_id='+encodeURIComponent(member.value)} function refreshLinks(){g.href=link('google');m.href=link('microsoft')} member.oninput=refreshLinks;refreshLinks();
+async function loadConnections(){connections.textContent=JSON.stringify(await (await fetch('/api/calendar/connections')).json(),null,2)}
+async function syncCandidates(){const r=await fetch('/api/wg/sync',{method:'POST'}); alert(JSON.stringify(await r.json())); loadCandidates()}
+async function setStatus(id,status){await fetch('/api/candidates/'+id+'/status',{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({status})});loadCandidates()}
+async function loadCandidates(){const data=await (await fetch('/api/candidates')).json(); candidates.innerHTML=data.length?'':'<p class="muted">No applicants synced yet.</p>'; for(const c of data){const ev=(c.fit.criteria||[]).filter(x=>x.evidence&&x.evidence.length).map(x=>'<li><b>'+x.label+':</b> '+x.evidence[0]+'</li>').join(''); candidates.innerHTML += '<div class="candidate"><div class="score">'+c.fit.score+'/100</div><b>'+c.display_name+'</b> <span class="muted">· '+c.status+'</span><ul>'+ev+'</ul><div class="row"><button onclick="setStatus(\''+c.id+'\',\'shortlist\')">Shortlist</button><button class="secondary" onclick="setStatus(\''+c.id+'\',\'interview\')">Interview</button><button class="secondary" onclick="setStatus(\''+c.id+'\',\'pass\')">Pass</button></div></div>'}}
+loadCandidates();loadConnections();
 </script></body></html>'''
 
 
@@ -136,6 +141,7 @@ class Appointment(BaseModel):
     description: str = ''
     attendee_email: str | None = None
     location: str | None = None
+    mode: Literal['online', 'in_person'] = 'in_person'
 
 
 @app.post('/api/calendar/{connection_id}/appointments')
@@ -157,5 +163,57 @@ def create_appointment(connection_id: str, body: Appointment):
         description=body.description,
         attendee_email=body.attendee_email,
         location=body.location,
+        online=body.mode == 'online',
     )
-    return {'provider': connection['provider'], 'event_id': event.get('id'), 'event': event}
+    join_url = event.get('hangoutLink') or (event.get('onlineMeeting') or {}).get('joinUrl')
+    return {'provider': connection['provider'], 'event_id': event.get('id'), 'join_url': join_url, 'event': event}
+
+
+class CandidateStatus(BaseModel):
+    status: Literal['new', 'shortlist', 'interview', 'pass']
+
+
+@app.post('/api/wg/sync')
+def wg_sync(max_pages: int = Query(default=4, ge=1, le=20)):
+    try:
+        return sync_candidates(max_pages=max_pages)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.get('/api/candidates')
+def candidates():
+    return list_candidates()
+
+
+@app.patch('/api/candidates/{candidate_id}/status')
+def candidate_status(candidate_id: str, body: CandidateStatus):
+    if not set_candidate_status(candidate_id, body.status):
+        raise HTTPException(status_code=404, detail='Candidate not found')
+    return {'ok': True, 'status': body.status}
+
+
+class SlotSearch(BaseModel):
+    connection_ids: list[str]
+    start: datetime
+    end: datetime
+    duration_minutes: int = 30
+    step_minutes: int = 30
+    timezone: str = 'Europe/Berlin'
+
+
+@app.post('/api/schedule/slots')
+def schedule_slots(body: SlotSearch):
+    if body.end <= body.start:
+        raise HTTPException(status_code=400, detail='end must be after start')
+    if not 15 <= body.duration_minutes <= 180:
+        raise HTTPException(status_code=400, detail='duration_minutes must be between 15 and 180')
+    try:
+        slots = find_common_slots(
+            body.connection_ids, body.start, body.end,
+            duration_minutes=body.duration_minutes,
+            step_minutes=body.step_minutes, timezone_name=body.timezone,
+        )
+    except (ValueError, KeyError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {'slots': slots}
