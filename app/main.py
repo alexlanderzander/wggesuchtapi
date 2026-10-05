@@ -11,8 +11,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 
 from .calendars import provider_for
-from .scheduler import find_common_slots
-from .wg_service import sync_candidates
+from .candidates_store import list_candidates, set_candidate_status
 from .config import get_settings
 from .db import (
     get_calendar_connection,
@@ -21,9 +20,10 @@ from .db import (
     update_calendar_tokens,
     upsert_calendar_connection,
 )
-from .candidates_store import list_candidates, set_candidate_status
+from .scheduler import find_common_slots
+from .wg_service import sync_candidates
 
-app = FastAPI(title='WG Review MVP', version='0.1.0')
+app = FastAPI(title='WG Review MVP', version='0.2.0')
 
 
 @app.on_event('startup')
@@ -67,19 +67,34 @@ def home() -> str:
     return '''<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>WG Review MVP</title><style>
-body{font-family:system-ui,sans-serif;max-width:1050px;margin:32px auto;padding:0 20px;color:#171717;background:#fafafa}
-.card{background:#fff;border:1px solid #ddd;border-radius:16px;padding:20px;margin:16px 0}.row{display:flex;gap:10px;flex-wrap:wrap}.candidate{border-top:1px solid #eee;padding:14px 0}.score{font-size:28px;font-weight:700}button,a.btn{padding:10px 14px;border-radius:10px;border:0;background:#111;color:#fff;text-decoration:none;cursor:pointer}.secondary{background:#eee;color:#111}.muted{color:#666}input{padding:9px;border:1px solid #ccc;border-radius:8px}pre{white-space:pre-wrap}
+body{font-family:system-ui,sans-serif;max-width:1100px;margin:32px auto;padding:0 20px;color:#171717;background:#f7f7f7}
+.card{background:#fff;border:1px solid #ddd;border-radius:16px;padding:20px;margin:16px 0}.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.candidate{border-top:1px solid #eee;padding:18px 0}.badge{display:inline-block;background:#eee;border-radius:999px;padding:4px 9px;margin:3px 5px 3px 0;font-size:13px}.badge.warn{background:#fff1d6}.badge.ok{background:#e8f5e9}button,a.btn{padding:10px 14px;border-radius:10px;border:0;background:#111;color:#fff;text-decoration:none;cursor:pointer}.secondary{background:#eee;color:#111}.muted{color:#666}.small{font-size:13px}input{padding:9px;border:1px solid #ccc;border-radius:8px}pre{white-space:pre-wrap}details{margin-top:10px}.message{background:#fafafa;border-radius:10px;padding:12px;white-space:pre-wrap;max-height:320px;overflow:auto}
 </style></head><body>
-<h1>WG Review MVP</h1><p class="muted">Explainable applicant pre-screening + shared interview scheduling.</p>
-<div class="card"><h2>Applicants</h2><div class="row"><button onclick="syncCandidates()">Sync WG-Gesucht</button><button class="secondary" onclick="loadCandidates()">Refresh</button></div><div id="candidates">Loading…</div></div>
-<div class="card"><h2>Connect calendars</h2><p>Each roommate/applicant authorizes their own account. Use a stable local member id.</p><input id="member" value="roommate-1"><p><a class="btn" id="g">Google Calendar</a> <a class="btn" id="m">Outlook / Microsoft</a></p><pre id="connections"></pre></div>
+<h1>WG Review MVP</h1><p class="muted">Human review of WG-Gesucht applications + shared viewing scheduling.</p>
+<div class="card"><h2>Applicants</h2><p class="small muted">The app surfaces explicit WG-relevant statements and application completeness. It does not use sensitive traits such as age or gender to rank or recommend applicants.</p><div class="row"><button onclick="syncCandidates()">Sync WG-Gesucht</button><button class="secondary" onclick="loadCandidates()">Refresh</button></div><div id="candidates">Loading…</div></div>
+<div class="card"><h2>Connect calendars</h2><p>Each roommate or guest authorizes their own Google or Microsoft account inside this app.</p><input id="member" value="roommate-1"><p><a class="btn" id="g">Google Calendar</a> <a class="btn" id="m">Outlook / Microsoft</a></p><pre id="connections"></pre></div>
 <script>
 const member=document.getElementById('member'); const g=document.getElementById('g'); const m=document.getElementById('m');
-function link(provider){return '/api/calendar/'+provider+'/connect?member_id='+encodeURIComponent(member.value)} function refreshLinks(){g.href=link('google');m.href=link('microsoft')} member.oninput=refreshLinks;refreshLinks();
+function esc(v){return String(v??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]))}
+function link(provider){return '/api/calendar/'+provider+'/connect?member_id='+encodeURIComponent(member.value)}
+function refreshLinks(){g.href=link('google');m.href=link('microsoft')} member.oninput=refreshLinks;refreshLinks();
 async function loadConnections(){connections.textContent=JSON.stringify(await (await fetch('/api/calendar/connections')).json(),null,2)}
-async function syncCandidates(){const r=await fetch('/api/wg/sync',{method:'POST'}); alert(JSON.stringify(await r.json())); loadCandidates()}
+async function syncCandidates(){const r=await fetch('/api/wg/sync',{method:'POST'}); const body=await r.json(); if(!r.ok){alert(body.detail||'Sync failed')} else {alert('Synced '+body.synced+' conversations');} loadCandidates()}
 async function setStatus(id,status){await fetch('/api/candidates/'+id+'/status',{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({status})});loadCandidates()}
-async function loadCandidates(){const data=await (await fetch('/api/candidates')).json(); candidates.innerHTML=data.length?'':'<p class="muted">No applicants synced yet.</p>'; for(const c of data){const ev=(c.fit.criteria||[]).filter(x=>x.evidence&&x.evidence.length).map(x=>'<li><b>'+x.label+':</b> '+x.evidence[0]+'</li>').join(''); candidates.innerHTML += '<div class="candidate"><div class="score">'+c.fit.score+'/100</div><b>'+c.display_name+'</b> <span class="muted">· '+c.status+'</span><ul>'+ev+'</ul><div class="row"><button onclick="setStatus(\''+c.id+'\',\'shortlist\')">Shortlist</button><button class="secondary" onclick="setStatus(\''+c.id+'\',\'interview\')">Interview</button><button class="secondary" onclick="setStatus(\''+c.id+'\',\'pass\')">Pass</button></div></div>'}}
+function detailLabel(v){return ({very_short:'Very short',basic:'Basic',detailed:'Detailed',very_detailed:'Very detailed'})[v]||v}
+async function loadCandidates(){
+  const data=await (await fetch('/api/candidates')).json();
+  candidates.innerHTML=data.length?'':'<p class="muted">No applicants synced yet.</p>';
+  for(const c of data){
+    const s=c.signals||{}; const detail=s.application_detail||{}; const criteria=s.criteria||[];
+    const badges=[];
+    badges.push('<span class="badge '+(detail.availability_only?'warn':'')+'">'+esc(detailLabel(detail.detail_level||'unknown'))+' · '+esc(detail.word_count||0)+' words</span>');
+    if(detail.availability_only) badges.push('<span class="badge warn">Mostly availability question</span>');
+    for(const item of criteria){if(item.mentioned) badges.push('<span class="badge ok">'+esc(item.label)+'</span>')}
+    const evidence=criteria.filter(x=>x.evidence&&x.evidence.length).map(x=>'<li><b>'+esc(x.label)+':</b> '+esc(x.evidence[0])+'</li>').join('');
+    candidates.innerHTML += '<div class="candidate"><div class="row"><b>'+esc(c.display_name)+'</b><span class="muted">'+esc(c.status)+'</span></div><div>'+badges.join('')+'</div>'+(evidence?'<ul>'+evidence+'</ul>':'<p class="muted small">No WG-specific topics detected yet.</p>')+'<details><summary>Application text</summary><div class="message">'+esc(c.latest_message||'')+'</div></details><div class="row" style="margin-top:12px"><button onclick="setStatus(\''+esc(c.id)+'\',\'shortlist\')">Shortlist</button><button class="secondary" onclick="setStatus(\''+esc(c.id)+'\',\'interview\')">Interview</button><button class="secondary" onclick="setStatus(\''+esc(c.id)+'\',\'pass\')">Pass</button></div></div>';
+  }
+}
 loadCandidates();loadConnections();
 </script></body></html>'''
 
@@ -208,11 +223,16 @@ def schedule_slots(body: SlotSearch):
         raise HTTPException(status_code=400, detail='end must be after start')
     if not 15 <= body.duration_minutes <= 180:
         raise HTTPException(status_code=400, detail='duration_minutes must be between 15 and 180')
+    if not 5 <= body.step_minutes <= 180:
+        raise HTTPException(status_code=400, detail='step_minutes must be between 5 and 180')
     try:
         slots = find_common_slots(
-            body.connection_ids, body.start, body.end,
+            body.connection_ids,
+            body.start,
+            body.end,
             duration_minutes=body.duration_minutes,
-            step_minutes=body.step_minutes, timezone_name=body.timezone,
+            step_minutes=body.step_minutes,
+            timezone_name=body.timezone,
         )
     except (ValueError, KeyError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
